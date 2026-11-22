@@ -1,4 +1,8 @@
 IMAGE?=archlinux-x86-64
+# "default" = the builder of the Docker daemon: it sees the images loaded by the previous build
+# (build-astroarch starts FROM the local base image). A docker-container builder, such as the one
+# docker/setup-buildx-action creates in CI, does not, and would try to pull the base from Docker Hub.
+BUILDER?=default
 BOARD?=pc
 
 # Build arguments to use a fork of astroarch:
@@ -11,6 +15,7 @@ ASTROARCH_RAW?=https://raw.githubusercontent.com/devDucks/astroarch/refs/heads/$
 .PHONY: build-base
 build-base:
 	docker buildx build \
+	  --builder $(BUILDER) \
 	  --platform linux/amd64 \
 	  -t $(IMAGE):latest \
 	  -f dockerfiles/Dockerfile.base \
@@ -21,6 +26,7 @@ build-base:
 .PHONY: build-astroarch
 build-astroarch: build-base
 	docker buildx build \
+	  --builder $(BUILDER) \
 	  --build-arg BASE_IMAGE=$(IMAGE):latest \
 	  --build-arg ASTROARCH_REPO=$(ASTROARCH_REPO) \
 	  --build-arg ASTROARCH_BRANCH=$(ASTROARCH_BRANCH) \
@@ -35,6 +41,7 @@ build-astroarch: build-base
 .PHONY: build-astroarch-rootfs
 build-astroarch-rootfs: build-base
 	docker buildx build \
+	  --builder $(BUILDER) \
 	  --build-arg BUILDKIT_SANDBOX_SIZE=30G \
 	  --build-arg BASE_IMAGE=$(IMAGE):latest \
 	  --build-arg ASTROARCH_REPO=$(ASTROARCH_REPO) \
