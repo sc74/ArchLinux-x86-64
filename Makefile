@@ -81,4 +81,4 @@ check-board:
 
 .PHONY: prepare-img
 prepare-img: check-board build-astroarch-rootfs create-rootfs-container copy-rootfs-tar
-	BOARD=$(BOARD) IMG=archlinux-$(BOARD)-x86_64.img ./scripts/build_img.sh
+	BOARD=$(BOARD) IMG=archlinux-$(BOARD)-x86_64.img bash ./scripts/build_img.sh
