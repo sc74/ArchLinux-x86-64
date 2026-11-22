@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+#
+# Arch Linux x86-64 base for AstroArch: the official archlinux image with pacman set up for
+# containers, the keyring, ssh and what astroarch_build.sh expects to find.
+# Native build, no emulation (the ARM counterpart needs an Alpine bootstrap and QEMU).
+
+FROM archlinux:latest AS builder
+
+# Pacman in a container: no Landlock sandbox, parallel downloads
+RUN sed -i 's/^#DisableSandbox/DisableSandbox/' /etc/pacman.conf && \
+    (grep -q '^DisableSandbox' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf) && \
+    sed -i 's/^#\?ParallelDownloads.*/ParallelDownloads = 5/' /etc/pacman.conf
+
+RUN pacman-key --init && pacman-key --populate archlinux
+
+RUN pacman -Syu --noconfirm
+
+# ssh, curl, wget and an editor; dbus for NetworkManager
+RUN pacman -S --noconfirm --needed curl wget nano openssh dbus
+
+# sshd on at boot (root login by password is NOT enabled)
+RUN mkdir -p /etc/systemd/system/multi-user.target.wants && \
+    ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
+
+# Cleanup pacman-key init
+RUN rm -rf /etc/pacman.d/gnupg*

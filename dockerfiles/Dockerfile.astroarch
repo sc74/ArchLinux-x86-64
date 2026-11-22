@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.7
+#
+# AstroArch for x86-64 (PCs and mini PCs). The build itself is astroarch_build.sh, which detects
+# x86_64 and installs packages.txt + packages-x86.txt.
+#
+# Build arguments, to build a fork or a branch of devDucks/astroarch:
+#   ASTROARCH_REPO, ASTROARCH_BRANCH, ASTROARCH_RAW (where astroarch_build.sh is downloaded from)
+#   BASE_IMAGE: the image of Dockerfile.base (local after `make build-base`, or the one in GHCR)
+
+ARG BASE_IMAGE=archlinux-x86-64:latest
+FROM ${BASE_IMAGE} AS builder
+
+ARG ASTROARCH_REPO=https://github.com/devDucks/astroarch.git
+ARG ASTROARCH_BRANCH=main
+ARG ASTROARCH_RAW=https://raw.githubusercontent.com/devDucks/astroarch/refs/heads/main
+
+# Push the astromatto repo so we can pull whatever package into docker immediately
+RUN sed -i 's|\[core\]|\[astromatto\]\nSigLevel = Optional TrustAll\nServer = http://astroarch.astromatto.com:9000/$arch\n\n\[core\]|' /etc/pacman.conf
+
+# We love candies, don't we?
+RUN sed -i 's|ParallelDownloads = 5|ParallelDownloads = 5\nILoveCandy|g' /etc/pacman.conf
+
+# Disable timeouts for slow downloads
+RUN sed -i 's|ParallelDownloads = 5|ParallelDownloads = 5\nDisableDownloadTimeout|g' /etc/pacman.conf
+
+RUN pacman-key --init && pacman-key --populate archlinux
+
+RUN pacman -Syu --noconfirm
+
+RUN mkdir -p /run/dbus && dbus-daemon --system --fork
+
+# hostname and hosts are set by the image build (scripts/build_img.sh), not here
+RUN curl -fsSLo astroarch_build.sh ${ASTROARCH_RAW}/astroarch_build.sh && \
+    sed -i '/\/etc\/hosts/d; /\/etc\/hostname/d;' astroarch_build.sh
+
+RUN bash astroarch_build.sh
+
+RUN mkdir -p /home/astronaut/.local/share/kstars/astrometry
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4100/index-41{07..19}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-4205-{00..11}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-4206-{00..11}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-4207-{00..11}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-42{08..19}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-{00..47}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5206-{00..47}.fits
+
+####################################
+# Only needed to retrieve a rootfs #
+####################################
+FROM builder AS rootfs-builder
+# Create rootfs
+RUN tar -cpf /rootfs.tar \
+  --numeric-owner --xattrs --acls --one-file-system \
+  --sort=name --mtime='UTC 2020-01-01' \
+  --exclude=/proc --exclude=/sys --exclude=/dev \
+  --exclude=/mnt --exclude=/media --exclude=/run \
+  --exclude=/tmp/* --exclude=/var/tmp/* \
+  --exclude=/var/cache/pacman/pkg/* \
+  --exclude=/var/log/* \
+  /
+
+###############################################
+# EXPORT-ONLY: tarball artifact stage
+###############################################
+FROM scratch AS astroarch-rootfs
+COPY --from=rootfs-builder /rootfs.tar /astroarch-rootfs.tar

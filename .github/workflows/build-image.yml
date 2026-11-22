@@ -1,0 +1,70 @@
+name: Build AstroArch x86-64 image (BIOS + UEFI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      astroarch_repo:
+        description: 'astroarch repository to build (GitHub URL)'
+        default: 'https://github.com/devDucks/astroarch.git'
+      astroarch_branch:
+        description: 'astroarch branch'
+        default: 'main'
+  push:
+    tags: [ "img-v*" ]
+
+permissions:
+  contents: write
+
+jobs:
+  image:
+    name: x86-64 image
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The rootfs (~15 GB) and the 20 GB sparse image need room
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the rootfs and assemble the image
+        run: |
+          REPO="${{ inputs.astroarch_repo || 'https://github.com/devDucks/astroarch.git' }}"
+          BRANCH="${{ inputs.astroarch_branch || 'main' }}"
+          # astroarch_build.sh is downloaded from the same branch: GitHub URLs only
+          RAW="https://raw.githubusercontent.com/${REPO#https://github.com/}"
+          RAW="${RAW%.git}/refs/heads/${BRANCH}"
+          make prepare-img ASTROARCH_REPO="$REPO" ASTROARCH_BRANCH="$BRANCH" ASTROARCH_RAW="$RAW"
+
+      - name: Shrink and compress
+        run: |
+          VERSION=$(date +%Y%m%d)
+          wget -q https://raw.githubusercontent.com/Drewsif/PiShrink/master/pishrink.sh
+          chmod +x pishrink.sh
+          sudo ./pishrink.sh -za archlinux-pc-x86_64.img "astroarch-x86_64-${VERSION}.img.gz"
+          sha256sum "astroarch-x86_64-${VERSION}.img.gz" > "astroarch-x86_64-${VERSION}.img.gz.sha256"
+          ls -lh astroarch-x86_64-*
+
+      - name: Upload the image
+        uses: actions/upload-artifact@v4
+        with:
+          name: astroarch-x86_64
+          path: |
+            astroarch-x86_64-*.img.gz
+            astroarch-x86_64-*.img.gz.sha256
+          retention-days: 14
+
+      - name: Release (tags img-v*)
+        if: startsWith(github.ref, 'refs/tags/img-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            astroarch-x86_64-*.img.gz
+            astroarch-x86_64-*.img.gz.sha256
