@@ -72,6 +72,12 @@ sudo mount "$BOOT_DEV" "$ROOT/boot/efi"
 # --- extract rootfs (preserve xattrs/owners) ---
 sudo tar --numeric-owner -xpf "$ROOTFS_TAR" -C "$ROOT"
 
+# The rootfs tarball leaves out /dev /proc /sys /run /mnt /media: they are mount points, created
+# here (needed by the chroot below, and by the first boot)
+sudo install -d -m 0755 "$ROOT/dev" "$ROOT/run" "$ROOT/mnt" "$ROOT/media"
+sudo install -d -m 0555 "$ROOT/proc" "$ROOT/sys"
+sudo install -d -m 1777 "$ROOT/tmp" "$ROOT/var/tmp"
+
 # --- hostname & hosts (cannot be set during Docker build) ---
 echo "astroarch" | sudo tee "$ROOT/etc/hostname" >/dev/null
 printf '127.0.0.1\tlocalhost\n127.0.1.1\tastroarch\n' | sudo tee -a "$ROOT/etc/hosts" >/dev/null
