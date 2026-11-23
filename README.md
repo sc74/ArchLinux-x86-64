@@ -79,10 +79,17 @@ sync
 
 ## The disk image
 
-`scripts/build_img.sh` builds a disk that boots in **BIOS and UEFI** (profile in `boards/pc.conf`):
+`scripts/build_img.sh` builds a disk that boots in **BIOS and UEFI** (profile in `boards/pc.conf`), with
+two partitions and an MBR partition table:
 
-- MBR partition table. Partition 1: EFI System Partition (512 MiB, FAT32, mounted on `/boot/efi`).
-  Partition 2: ext4 root. The kernel, the initramfs and `grub.cfg` are on the root, in `/boot`.
+| Partition | Mounted on | Filesystem | Label | Content |
+|---|---|---|---|---|
+| 1 | `/boot` | FAT32, 512 MiB | `ASTROARCH_B` | kernel, initramfs, microcode, GRUB (and the EFI System Partition) |
+| 2 | `/` | ext4, rest of the disk | `ASTROARCH_ROOT` | the system |
+
+- A FAT label holds 11 characters at most, so `ASTROARCH_BOOT` is not possible for partition 1. It is
+  `ASTROARCH_B`; change it with `BOOT_LABEL=` (11 characters at most). The ext4 label is
+  `ASTROARCH_ROOT` (`ROOT_LABEL=`).
 - GRUB is installed twice, in a chroot of the rootfs (its own grub and mkinitcpio, the build
   machine needs neither): `i386-pc` for BIOS and `x86_64-efi` in the removable location
   `EFI/BOOT/BOOTX64.EFI` (no NVRAM entry, so the disk boots on any machine).
@@ -91,7 +98,8 @@ sync
   upgrade of the `grub` package a pacman hook of `astroarch` rewrites the boot code.
 - The initramfs has no `autodetect` hook, so it holds the drivers of any PC, not only of the
   build machine.
-- Secure Boot is not supported (GRUB is not signed): disable it in the firmware.
+- Secure Boot is not supported (GRUB is not signed): disable it in the firmware, or UEFI stops with
+  "Invalid signature detected. Check Secure Boot Policy in Setup".
 - The image is sparse, 20 GB by default (`SIZE=`); the root grows to the whole disk at the first boot
   (`resize_once.service`).
 

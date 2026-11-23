@@ -2,16 +2,17 @@
 set -euo pipefail
 
 # Assembles the bootable x86-64 disk image (BIOS + UEFI) from the rootfs tarball of the Docker
-# build. Needs sudo, sfdisk, losetup, mkfs.vfat, mkfs.ext4, blkid and tar on the host; grub and
+# build. Two partitions: /boot (FAT32, kernel + initramfs + GRUB) and / (ext4).
+# Needs sudo, sfdisk, losetup, mkfs.vfat, mkfs.ext4, blkid and tar on the host; grub and
 # mkinitcpio are the ones of the rootfs, used in a chroot.
 
 # --- settings ---
 BOARD=${BOARD:-pc}
 IMG=${IMG:-archlinux-${BOARD}-x86_64.img}
 SIZE=${SIZE:-20G}         # total image size
-BOOT_MB=${BOOT_MB:-512}   # FAT32 EFI System Partition size in MiB
-ROOT_LABEL=${ROOT_LABEL:-ASTRO_ROOT}
-BOOT_LABEL=${BOOT_LABEL:-ASTRO_BOOT}
+BOOT_MB=${BOOT_MB:-512}   # /boot (FAT32, also the EFI System Partition) size in MiB
+ROOT_LABEL=${ROOT_LABEL:-ASTROARCH_ROOT}   # ext4 label, 16 characters at most
+BOOT_LABEL=${BOOT_LABEL:-ASTROARCH_B}      # FAT label, 11 characters at most (ASTROARCH_BOOT is 14)
 ROOTFS_TAR=${ROOTFS_TAR:-rootfs.tar}
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -24,6 +25,8 @@ source "$BOARD_CONF"
 
 # sanity
 [ -f "$ROOTFS_TAR" ] || { echo "Missing $ROOTFS_TAR"; exit 1; }
+[ "${#BOOT_LABEL}" -le 11 ] || { echo "BOOT_LABEL '$BOOT_LABEL' is longer than 11 characters, the limit of a FAT label"; exit 1; }
+[ "${#ROOT_LABEL}" -le 16 ] || { echo "ROOT_LABEL '$ROOT_LABEL' is longer than 16 characters, the limit of an ext4 label"; exit 1; }
 for tool in sfdisk losetup blkid mkfs.vfat mkfs.ext4; do
   command -v "$tool" >/dev/null || { echo "Missing tool: $tool"; exit 1; }
 done
@@ -42,7 +45,7 @@ trap cleanup EXIT
 # --- create sparse disk file ---
 truncate -s "$SIZE" "$IMG"
 
-# --- partition table (MBR): ESP (type ef, active) then the ext4 root ---
+# --- partition table (MBR): /boot (FAT32, type ef = EFI System Partition, active) then the ext4 root ---
 BOOT_SIZE=$(( BOOT_MB * 2048 ))               # sectors (MiB * 2048)
 sfdisk "$IMG" <<EOF2
 label: dos
@@ -63,14 +66,18 @@ sudo mkfs.ext4 -F -L "$ROOT_LABEL" "$ROOT_DEV"
 BOOT_UUID=$(sudo blkid -s UUID -o value "$BOOT_DEV")
 ROOT_UUID=$(sudo blkid -s UUID -o value "$ROOT_DEV")
 
-# --- mount: the ESP is inside the root's /boot, which holds the kernel and the initramfs ---
+# --- mount the root, extract the rootfs (preserve owners) ---
 sudo mkdir -p "$ROOT"
 sudo mount "$ROOT_DEV" "$ROOT"
-sudo mkdir -p "$ROOT/boot/efi"
-sudo mount "$BOOT_DEV" "$ROOT/boot/efi"
-
-# --- extract rootfs (preserve xattrs/owners) ---
 sudo tar --numeric-owner -xpf "$ROOTFS_TAR" -C "$ROOT"
+
+# --- /boot is its own partition: FAT32 cannot hold owners, modes or symlinks, so the content of
+# the rootfs' /boot (kernel, initramfs, microcode) is copied onto it instead of extracted there ---
+sudo mv "$ROOT/boot" "$ROOT/boot.stage"
+sudo mkdir "$ROOT/boot"
+sudo mount "$BOOT_DEV" "$ROOT/boot"
+sudo cp -rL --no-preserve=all "$ROOT/boot.stage/." "$ROOT/boot/"
+sudo rm -rf "$ROOT/boot.stage"
 
 # The rootfs tarball leaves out /dev /proc /sys /run /mnt /media: they are mount points, created
 # here (needed by the chroot below, and by the first boot)
@@ -97,7 +104,7 @@ CONSOLE_ARGS="${CONSOLE_ARGS% }"
 # --- fstab: UUIDs, so device names don't matter ---
 sudo tee "$ROOT/etc/fstab" <<EOF2
 UUID=${ROOT_UUID}  /          ext4   defaults,noatime   0 1
-UUID=${BOOT_UUID}  /boot/efi  vfat   umask=0077,nofail  0 2
+UUID=${BOOT_UUID}  /boot      vfat   umask=0077         0 2
 EOF2
 
 # --- chroot: the rootfs has its own grub and mkinitcpio, the build machine needs neither ---
@@ -120,33 +127,31 @@ sudo chroot "$ROOT" mkinitcpio -P
 
 # BIOS: boot code in the gap before partition 1 + core image on the root
 sudo chroot "$ROOT" grub-install --target=i386-pc --recheck "$LOOP"
-# UEFI: removable location of the ESP (EFI/BOOT/BOOTX64.EFI), no NVRAM entry to write
-sudo chroot "$ROOT" grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram
+# UEFI: /boot is the ESP; removable location (EFI/BOOT/BOOTX64.EFI), no NVRAM entry to write
+sudo chroot "$ROOT" grub-install --target=x86_64-efi --efi-directory=/boot --removable --no-nvram
 
 # Static grub.cfg: the kernel and the initramfs keep their names across upgrades, so it never
 # has to be regenerated (grub-mkconfig does not work well in a chroot over a loop device).
+# GRUB reads it from the /boot partition, which is therefore GRUB's root: the paths below are
+# relative to it (/vmlinuz-linux is /boot/vmlinuz-linux once the system runs).
 # Hidden menu, 1 second: Esc shows it, for the console entry.
 INITRDS=""
 for ucode in amd-ucode intel-ucode; do
-  [ -f "$ROOT/boot/$ucode.img" ] && INITRDS="$INITRDS /boot/$ucode.img"
+  [ -f "$ROOT/boot/$ucode.img" ] && INITRDS="$INITRDS /$ucode.img"
 done
-INITRDS="$INITRDS /boot/initramfs-linux.img"
+INITRDS="$INITRDS /initramfs-linux.img"
 sudo tee "$ROOT/boot/grub/grub.cfg" >/dev/null <<EOF2
 set default=0
 set timeout=1
 set timeout_style=hidden
 
-insmod part_msdos
-insmod ext2
-search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
-
 menuentry "AstroArch" {
-    linux  /boot/vmlinuz-linux root=UUID=${ROOT_UUID} rw rootwait ${CONSOLE_ARGS} quiet loglevel=3 fsck.repair=yes
+    linux  /vmlinuz-linux root=UUID=${ROOT_UUID} rw rootwait ${CONSOLE_ARGS} quiet loglevel=3 fsck.repair=yes
     initrd${INITRDS}
 }
 
 menuentry "AstroArch (console)" {
-    linux  /boot/vmlinuz-linux root=UUID=${ROOT_UUID} rw rootwait ${CONSOLE_ARGS} systemd.unit=multi-user.target
+    linux  /vmlinuz-linux root=UUID=${ROOT_UUID} rw rootwait ${CONSOLE_ARGS} systemd.unit=multi-user.target
     initrd${INITRDS}
 }
 EOF2
