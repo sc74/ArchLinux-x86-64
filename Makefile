@@ -1,4 +1,9 @@
 IMAGE?=archlinux-x86-64
+# Secure Boot: make prepare-img SECURE_BOOT=1  (keys: ./scripts/gen-mok.sh)
+SECURE_BOOT?=0
+MOK_KEY?=secureboot/MOK.key
+MOK_CRT?=secureboot/MOK.crt
+SB_EMBED_KEY?=1
 # "default" = the builder of the Docker daemon: it sees the images loaded by the previous build
 # (build-astroarch starts FROM the local base image). A docker-container builder, such as the one
 # docker/setup-buildx-action creates in CI, does not, and would try to pull the base from Docker Hub.
@@ -28,6 +33,7 @@ build-astroarch: build-base
 	docker buildx build \
 	  --builder $(BUILDER) \
 	  --build-arg BASE_IMAGE=$(IMAGE):latest \
+	  --build-arg SECURE_BOOT=$(SECURE_BOOT) \
 	  --build-arg ASTROARCH_REPO=$(ASTROARCH_REPO) \
 	  --build-arg ASTROARCH_BRANCH=$(ASTROARCH_BRANCH) \
 	  --build-arg ASTROARCH_RAW=$(ASTROARCH_RAW) \
@@ -44,6 +50,7 @@ build-astroarch-rootfs: build-base
 	  --builder $(BUILDER) \
 	  --build-arg BUILDKIT_SANDBOX_SIZE=30G \
 	  --build-arg BASE_IMAGE=$(IMAGE):latest \
+	  --build-arg SECURE_BOOT=$(SECURE_BOOT) \
 	  --build-arg ASTROARCH_REPO=$(ASTROARCH_REPO) \
 	  --build-arg ASTROARCH_BRANCH=$(ASTROARCH_BRANCH) \
 	  --build-arg ASTROARCH_RAW=$(ASTROARCH_RAW) \
@@ -81,4 +88,5 @@ check-board:
 
 .PHONY: prepare-img
 prepare-img: check-board build-astroarch-rootfs create-rootfs-container copy-rootfs-tar
+	SECURE_BOOT=$(SECURE_BOOT) MOK_KEY=$(MOK_KEY) MOK_CRT=$(MOK_CRT) SB_EMBED_KEY=$(SB_EMBED_KEY) \
 	BOARD=$(BOARD) IMG=archlinux-$(BOARD)-x86_64.img bash ./scripts/build_img.sh

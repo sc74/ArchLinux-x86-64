@@ -31,6 +31,10 @@ RUN mkdir -p /run/dbus && dbus-daemon --system --fork
 
 # hostname and hosts are set by the image build (scripts/build_img.sh), not here
 RUN curl -fsSLo astroarch_build.sh ${ASTROARCH_RAW}/astroarch_build.sh && \
+    (grep -q 'x86_64' astroarch_build.sh || { \
+      echo "ERROR: ${ASTROARCH_RAW}/astroarch_build.sh has no x86_64 support."; \
+      echo "Build a fork or a branch of astroarch that has it: ASTROARCH_REPO, ASTROARCH_BRANCH, ASTROARCH_RAW."; \
+      exit 1; }) && \
     sed -i '/\/etc\/hosts/d; /\/etc\/hostname/d;' astroarch_build.sh
 
 RUN bash astroarch_build.sh
@@ -43,6 +47,17 @@ RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astromet
 RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-42{08..19}.fits
 RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-{00..47}.fits
 RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5206-{00..47}.fits
+
+# Secure Boot (SECURE_BOOT=1): shim, signed by Microsoft, from the AUR (shim-signed-bin)
+ARG SECURE_BOOT=0
+RUN if [ "$SECURE_BOOT" = "1" ]; then \
+      pacman -S --noconfirm --needed base-devel git && \
+      useradd -m aurbuild && \
+      echo 'aurbuild ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/aurbuild && \
+      su aurbuild -c 'cd /home/aurbuild && git clone https://aur.archlinux.org/shim-signed-bin.git && cd shim-signed-bin && makepkg -s --noconfirm' && \
+      pacman -U --noconfirm /home/aurbuild/shim-signed-bin/*.pkg.tar.* && \
+      rm -f /etc/sudoers.d/aurbuild && userdel -r aurbuild; \
+    fi
 
 ####################################
 # Only needed to retrieve a rootfs #

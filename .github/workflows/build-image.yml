@@ -31,10 +31,28 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # The "docker" driver (not the default "docker-container" one) so that the second build can
+      # use the base image the first one loaded: FROM archlinux-x86-64:latest is a local image
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
           driver: docker
+
+      # Secure Boot: put the secrets MOK_KEY and MOK_CRT (PEM, from scripts/gen-mok.sh) in the repository.
+      # The private key is embedded in the image (updates are signed on the machine): such an image
+      # is NOT published as a release, only kept as a private artifact
+      - name: Secure Boot keys
+        env:
+          MOK_KEY: ${{ secrets.MOK_KEY }}
+          MOK_CRT: ${{ secrets.MOK_CRT }}
+        run: |
+          if [ -n "$MOK_KEY" ] && [ -n "$MOK_CRT" ]; then
+            mkdir -p secureboot
+            printf '%s\n' "$MOK_KEY" > secureboot/MOK.key
+            printf '%s\n' "$MOK_CRT" > secureboot/MOK.crt
+            chmod 600 secureboot/MOK.key
+            echo "SB=1" >> "$GITHUB_ENV"
+          fi
 
       - name: Build the rootfs and assemble the image
         run: |
@@ -43,7 +61,7 @@ jobs:
           # astroarch_build.sh is downloaded from the same branch: GitHub URLs only
           RAW="https://raw.githubusercontent.com/${REPO#https://github.com/}"
           RAW="${RAW%.git}/refs/heads/${BRANCH}"
-          make prepare-img ASTROARCH_REPO="$REPO" ASTROARCH_BRANCH="$BRANCH" ASTROARCH_RAW="$RAW"
+          make prepare-img SECURE_BOOT="${SB:-0}" ASTROARCH_REPO="$REPO" ASTROARCH_BRANCH="$BRANCH" ASTROARCH_RAW="$RAW"
 
       - name: Shrink and compress
         run: |
@@ -64,7 +82,7 @@ jobs:
           retention-days: 14
 
       - name: Release (tags img-v*)
-        if: startsWith(github.ref, 'refs/tags/img-v')
+        if: startsWith(github.ref, 'refs/tags/img-v') && env.SB != '1'
         uses: softprops/action-gh-release@v2
         with:
           files: |

@@ -1,2 +1,6 @@
 archarm-*-aarch64.img
 *.tar
+
+# Secure Boot keys: never commit
+secureboot/
+*.key

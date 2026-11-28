@@ -84,7 +84,7 @@ two partitions and an MBR partition table:
 
 | Partition | Mounted on | Filesystem | Label | Content |
 |---|---|---|---|---|
-| 1 | `/boot` | FAT32, 512 MiB | `ASTROARCH_B` | kernel, initramfs, microcode, GRUB (and the EFI System Partition) |
+| 1 | `/boot` | FAT32, 1 GiB | `ASTROARCH_B` | kernel, initramfs, microcode, GRUB (UEFI reads it too) |
 | 2 | `/` | ext4, rest of the disk | `ASTROARCH_ROOT` | the system |
 
 - A FAT label holds 11 characters at most, so `ASTROARCH_BOOT` is not possible for partition 1. It is
@@ -98,13 +98,54 @@ two partitions and an MBR partition table:
   upgrade of the `grub` package a pacman hook of `astroarch` rewrites the boot code.
 - The initramfs has no `autodetect` hook, so it holds the drivers of any PC, not only of the
   build machine.
-- Secure Boot is not supported (GRUB is not signed): disable it in the firmware, or UEFI stops with
-  "Invalid signature detected. Check Secure Boot Policy in Setup".
+- `/boot` has MBR type `c` (FAT32 LBA), not `ef`: it is not flagged "esp", so file managers show it. Some strict
+  UEFI firmwares only look at type `ef`; if yours does not find the disk, build with `BOOT_PART_TYPE=ef`.
+- By default GRUB is not signed: with Secure Boot on, UEFI stops with "Invalid signature detected" or
+  "Access Denied". Either disable Secure Boot in the firmware, or build the image with Secure Boot
+  support (next section).
 - The image is sparse, 20 GB by default (`SIZE=`); the root grows to the whole disk at the first boot
   (`resize_once.service`).
 
 A new board profile is a `boards/<name>.conf` setting `BOOT_START`, `BOOT_MB` and `CONSOLE`
 (for example a serial console: `CONSOLE="ttyS0,115200 tty0"`), no change to the script.
+
+## Secure Boot (shim + a key enrolled once)
+
+A firmware only trusts what Microsoft signed, so the image starts **shim** (signed by Microsoft), which starts
+GRUB and the kernel signed with *your* key (a Machine Owner Key, MOK). The PC keeps Secure Boot on (Windows
+is not touched) and trusts your key after one confirmation in MokManager, once per machine.
+
+```bash
+./scripts/gen-mok.sh                      # secureboot/MOK.key (secret), MOK.crt, MOK.cer
+make prepare-img SECURE_BOOT=1            # build with shim, signed GRUB and kernel
+```
+
+First boot of the disk, with Secure Boot on: shim shows "Verification failed (0x1A) Security Violation" and
+opens MokManager ("Perform MOK management"):
+
+1. **Enroll key from disk**, then the partition of the disk (the one with `EFI`), then **`MOK.cer`**;
+2. confirm (**Yes**), then **Continue** / **Reboot**;
+3. boot the disk again: shim, GRUB and the kernel now start. Nothing more to do, also after updates.
+
+- **Updates:** `sbsigntools` and pacman hooks (`astroarch` repo: `scripts/x86/secureboot.sh`) sign the new kernel
+  and rebuild the signed GRUB on the machine, with the key kept in `/etc/astroarch/secureboot/`.
+- **The private key is inside the image** (`SB_EMBED_KEY=1`, the default), which is what makes the updates work
+  without anything to do. So **anyone who has the image can sign code that this key makes trusted**: build it for
+  your own machines, with your own key, and do not publish it. With `SB_EMBED_KEY=0` the key stays out of the image,
+  but the kernels installed by `pacman` are not signed any more and the PC stops booting after a kernel update.
+- **CI:** with the repository secrets `MOK_KEY` and `MOK_CRT` the workflow builds with Secure Boot. Such an image
+  is kept as an artifact and not attached to a release (it contains the key).
+- **SBAT:** shim refuses a GRUB whose SBAT generation is below its revocation policy, even when the key is
+  enrolled (and MokManager comes back with the same "Verification failed"). The Arch `sbat.csv` can declare an
+  older generation (`grub,4`) than the GRUB it ships: `grub-mkimage` reports its own build-time level in a warning
+  ("Global SBAT level 5 in sbat.csv does not match the build-time Global SBAT level 6"), and `secureboot.sh` uses
+  that level. `SBAT_GRUB_MIN` (default 5) is a floor for a shim that asks for more. Check what the shim asks with
+  `objcopy -O binary --only-section=.sbatlevel BOOTX64.EFI /dev/stdout | tr -c '[:print:]\n' '.'`.
+- **shim:** it comes from the AUR (`shim-signed-bin`), built during the Docker build. The Microsoft CA 2011 expired
+  in June 2026 and older shims were revoked: use a recent shim and, on a "secured-core" PC, allow the Microsoft
+  3rd party UEFI CA in the firmware.
+- **Not validated on real hardware.** Tested here: the files written by `build_img.sh` (shim, GRUB and kernel
+  signed, SBAT, `MOK.cer`) and the signatures. Not tested: the boot under Secure Boot of the final image.
 
 ## Default credentials
 

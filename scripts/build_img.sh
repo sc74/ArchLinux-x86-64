@@ -10,10 +10,16 @@ set -euo pipefail
 BOARD=${BOARD:-pc}
 IMG=${IMG:-archlinux-${BOARD}-x86_64.img}
 SIZE=${SIZE:-20G}         # total image size
-BOOT_MB=${BOOT_MB:-512}   # /boot (FAT32, also the EFI System Partition) size in MiB
+BOOT_MB=${BOOT_MB:-1024}  # /boot (FAT32) size in MiB
 ROOT_LABEL=${ROOT_LABEL:-ASTROARCH_ROOT}   # ext4 label, 16 characters at most
 BOOT_LABEL=${BOOT_LABEL:-ASTROARCH_B}      # FAT label, 11 characters at most (ASTROARCH_BOOT is 14)
 ROOTFS_TAR=${ROOTFS_TAR:-rootfs.tar}
+# Secure Boot (shim + a Machine Owner Key): SECURE_BOOT=1 with MOK_KEY/MOK_CRT (see scripts/gen-mok.sh).
+# SB_EMBED_KEY=1 keeps the private key in the image so that the updates are signed on the machine.
+SECURE_BOOT=${SECURE_BOOT:-0}
+MOK_KEY=${MOK_KEY:-secureboot/MOK.key}
+MOK_CRT=${MOK_CRT:-secureboot/MOK.crt}
+SB_EMBED_KEY=${SB_EMBED_KEY:-1}
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BOARD_CONF="${SCRIPT_DIR}/../boards/${BOARD}.conf"
@@ -27,6 +33,10 @@ source "$BOARD_CONF"
 [ -f "$ROOTFS_TAR" ] || { echo "Missing $ROOTFS_TAR"; exit 1; }
 [ "${#BOOT_LABEL}" -le 11 ] || { echo "BOOT_LABEL '$BOOT_LABEL' is longer than 11 characters, the limit of a FAT label"; exit 1; }
 [ "${#ROOT_LABEL}" -le 16 ] || { echo "ROOT_LABEL '$ROOT_LABEL' is longer than 16 characters, the limit of an ext4 label"; exit 1; }
+if [ "$SECURE_BOOT" = 1 ]; then
+  [ -f "$MOK_KEY" ] && [ -f "$MOK_CRT" ] || { echo "SECURE_BOOT=1 needs $MOK_KEY and $MOK_CRT (./scripts/gen-mok.sh)"; exit 1; }
+  command -v openssl >/dev/null || { echo "Missing tool: openssl"; exit 1; }
+fi
 for tool in sfdisk losetup blkid mkfs.vfat mkfs.ext4; do
   command -v "$tool" >/dev/null || { echo "Missing tool: $tool"; exit 1; }
 done
@@ -45,12 +55,14 @@ trap cleanup EXIT
 # --- create sparse disk file ---
 truncate -s "$SIZE" "$IMG"
 
-# --- partition table (MBR): /boot (FAT32, type ef = EFI System Partition, active) then the ext4 root ---
+# --- partition table (MBR): /boot (FAT32, active) then the ext4 root. BOOT_PART_TYPE is the MBR
+# partition type of /boot: c (FAT32 LBA) keeps it visible in file managers, ef (EFI System
+# Partition) is what some strict UEFI firmwares look for ---
 BOOT_SIZE=$(( BOOT_MB * 2048 ))               # sectors (MiB * 2048)
 sfdisk "$IMG" <<EOF2
 label: dos
 unit: sectors
-${IMG}1 : start=${BOOT_START}, size=${BOOT_SIZE}, type=ef, bootable
+${IMG}1 : start=${BOOT_START}, size=${BOOT_SIZE}, type=${BOOT_PART_TYPE:-c}, bootable
 ${IMG}2 : start=$((BOOT_START+BOOT_SIZE)), type=83
 EOF2
 
@@ -127,8 +139,26 @@ sudo chroot "$ROOT" mkinitcpio -P
 
 # BIOS: boot code in the gap before partition 1 + core image on the root
 sudo chroot "$ROOT" grub-install --target=i386-pc --recheck "$LOOP"
-# UEFI: /boot is the ESP; removable location (EFI/BOOT/BOOTX64.EFI), no NVRAM entry to write
-sudo chroot "$ROOT" grub-install --target=x86_64-efi --efi-directory=/boot --removable --no-nvram
+if [ "$SECURE_BOOT" = 1 ]; then
+  # UEFI with Secure Boot: shim (signed by Microsoft) -> GRUB and kernel signed with the MOK. The
+  # certificate MOK.cer is put on /boot: MokManager enrolls it at the first boot
+  for f in usr/share/shim-signed/shimx64.efi usr/share/shim-signed/mmx64.efi usr/share/grub/sbat.csv usr/lib/astroarch/secureboot.sh; do
+    [ -f "$ROOT/$f" ] || { echo "Secure Boot: /$f is missing from the rootfs (needs shim-signed-bin, grub and astroarch)"; exit 1; }
+  done
+  sudo install -d -m 700 "$ROOT/etc/astroarch/secureboot"
+  sudo install -m 600 "$MOK_KEY" "$ROOT/etc/astroarch/secureboot/MOK.key"
+  sudo install -m 644 "$MOK_CRT" "$ROOT/etc/astroarch/secureboot/MOK.crt"
+  openssl x509 -in "$MOK_CRT" -outform DER | sudo tee "$ROOT/etc/astroarch/secureboot/MOK.cer" >/dev/null
+  sudo chroot "$ROOT" /usr/lib/astroarch/secureboot.sh install-grub
+  sudo chroot "$ROOT" /usr/lib/astroarch/secureboot.sh sign-kernel
+  if [ "$SB_EMBED_KEY" != 1 ]; then
+    # no private key on the machine: kernel upgrades will have to be signed elsewhere
+    sudo rm -f "$ROOT/etc/astroarch/secureboot/MOK.key"
+  fi
+else
+  # UEFI: /boot is the ESP; removable location (EFI/BOOT/BOOTX64.EFI), no NVRAM entry to write
+  sudo chroot "$ROOT" grub-install --target=x86_64-efi --efi-directory=/boot --removable --no-nvram
+fi
 
 # Static grub.cfg: the kernel and the initramfs keep their names across upgrades, so it never
 # has to be regenerated (grub-mkconfig does not work well in a chroot over a loop device).
